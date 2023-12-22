@@ -5,7 +5,7 @@ import (
 	"fmt"
 	"strings"
 
-	"avkitgo/proto"
+	"github.com/liuhengloveyou/avkit-go/proto"
 )
 
 var goRemuxProgressCB proto.GoRemuxProgressCB

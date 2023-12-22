@@ -1,8 +1,8 @@
 package avkitgo
 
 import (
-	"avkitgo/internal/ffmpeg"
-	"avkitgo/proto"
+	"github.com/liuhengloveyou/avkit-go/internal/ffmpeg"
+	"github.com/liuhengloveyou/avkit-go/proto"
 )
 
 type AVKit struct {
