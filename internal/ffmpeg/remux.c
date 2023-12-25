@@ -5,6 +5,9 @@ gcc remux.c -I. -ID:/dev/av/ffmpeg-6.1-full_build-shared/include -LD:/dev/av/ffm
 
 #include <libavutil/timestamp.h>
 #include <libavformat/avformat.h>
+#include <libavfilter/avfilter.h>
+#include <libavcodec/bsf.h>
+#include "libswscale/swscale.h"
 
 #include <time.h>
 #include "unistd.h"
@@ -12,8 +15,9 @@ gcc remux.c -I. -ID:/dev/av/ffmpeg-6.1-full_build-shared/include -LD:/dev/av/ffm
 #include "progress.h"
 #include "remux.h"
 
-int isStop = 0;
-time_t t1 = 0;
+static time_t t1 = 0;
+
+static AVBSFContext *bsf_ctx = NULL;
 
 struct buffer_data
 {
@@ -61,6 +65,62 @@ static int read_packet(void *opaque, uint8_t *buf, int buf_size)
     return buf_size;
 }
 
+int open_bitstream_filter(AVStream *stream, AVBSFContext **bsf_ctx, const char *name)
+{
+    int ret = 0;
+
+    const AVBitStreamFilter *filter = av_bsf_get_by_name(name);
+    if (!filter)
+    {
+        ret = -1;
+        fprintf(stderr, "Unknow bitstream filter.\n");
+    }
+    if ((ret = av_bsf_alloc(filter, bsf_ctx) < 0))
+    {
+        fprintf(stderr, "av_bsf_alloc failed\n");
+        return ret;
+    }
+    if ((ret = avcodec_parameters_copy((*bsf_ctx)->par_in, stream->codecpar)) < 0)
+    {
+        fprintf(stderr, "avcodec_parameters_copy failed, ret=%d\n", ret);
+        return ret;
+    }
+    if ((ret = av_bsf_init(*bsf_ctx)) < 0)
+    {
+        fprintf(stderr, "av_bsf_init failed, ret=%d\n", ret);
+        return ret;
+    }
+
+    return ret;
+}
+
+int64_t pts = 0;
+int64_t dts = 0;
+
+int filter_stream(AVBSFContext *bsf_ctx, AVFormatContext *ofmt_ctx, AVStream *in_stream, AVStream *out_stream, AVPacket *pkt)
+{
+    int ret = 0;
+    if (ret = av_bsf_send_packet(bsf_ctx, pkt) < 0)
+    {
+        fprintf(stderr, "av_bsf_send_packet failed, ret=%d\n", ret);
+        return ret;
+    }
+
+    while ((ret = av_bsf_receive_packet(bsf_ctx, pkt) == 0))
+    {
+        ret = av_interleaved_write_frame(ofmt_ctx, pkt);
+        if (ret < 0)
+            return ret;
+
+        av_packet_unref(pkt);
+    }
+
+    if (ret == AVERROR(EAGAIN))
+        return 0;
+
+    return ret;
+}
+
 int remux(Remuxer *remuxer)
 {
     const AVOutputFormat *ofmt = NULL;
@@ -72,6 +132,9 @@ int remux(Remuxer *remuxer)
     int *stream_mapping = NULL;
     int stream_mapping_size = 0;
     size_t buffer_size, avio_ctx_buffer_size = 4096;
+
+    int is_annexb = 1;
+    int video_stream_index = -1;
 
     const char *in = remuxer->in_file;
     const char *out = remuxer->out_file;
@@ -161,6 +224,12 @@ int remux(Remuxer *remuxer)
             goto end;
         }
         out_stream->codecpar->codec_tag = 0;
+
+        if (ifmt_ctx->streams[i]->codecpar->codec_type == AVMEDIA_TYPE_VIDEO)
+        {
+            video_stream_index = i;
+            is_annexb = strcmp(av_fourcc2str(ifmt_ctx->streams[i]->codecpar->codec_tag), "avc1") >= 0 ? 1 : 0;
+        }
     }
     av_dump_format(ofmt_ctx, 0, out, 1);
 
@@ -173,21 +242,36 @@ int remux(Remuxer *remuxer)
         }
     }
 
-    if ((ret = av_dict_set(&options, "hls_time", "100", 0)) < 0)
+    if (video_stream_index == -1)
     {
-        fprintf(stderr, "Failed to set listen mode for server: %s\n", av_err2str(ret));
-        return ret;
+        fprintf(stderr, "no video stream found.\n");
+        goto end;
     }
-    if ((ret = av_dict_set(&options, "hls_list_size", "0", 0)) < 0)
+
+    if (is_annexb)
     {
-        fprintf(stderr, "Failed to set listen mode for server: %s\n", av_err2str(ret));
-        return ret;
+        if (ret = open_bitstream_filter(ifmt_ctx->streams[video_stream_index], &bsf_ctx, "h264_mp4toannexb") < 0)
+        {
+            fprintf(stderr, "open_bitstream_filter failed, ret=%d\n", ret);
+            goto end;
+        }
     }
-    if ((ret = av_dict_set(&options, "hls_wrap", "0", 0)) < 0)
-    {
-        fprintf(stderr, "Failed to set listen mode for server: %s\n", av_err2str(ret));
-        return ret;
-    }
+
+    // if ((ret = av_dict_set(&options, "hls_time", "100", 0)) < 0)
+    // {
+    //     fprintf(stderr, "Failed to set listen mode for server: %s\n", av_err2str(ret));
+    //     return ret;
+    // }
+    // if ((ret = av_dict_set(&options, "hls_list_size", "0", 0)) < 0)
+    // {
+    //     fprintf(stderr, "Failed to set listen mode for server: %s\n", av_err2str(ret));
+    //     return ret;
+    // }
+    // if ((ret = av_dict_set(&options, "hls_wrap", "0", 0)) < 0)
+    // {
+    //     fprintf(stderr, "Failed to set listen mode for server: %s\n", av_err2str(ret));
+    //     return ret;
+    // }
 
     ret = avformat_write_header(ofmt_ctx, &options);
     if (ret < 0)
@@ -196,7 +280,7 @@ int remux(Remuxer *remuxer)
         goto end;
     }
 
-    while (!isStop)
+    while (!remuxer->isStop)
     {
         AVStream *in_stream, *out_stream;
 
@@ -204,15 +288,15 @@ int remux(Remuxer *remuxer)
         if (ret < 0)
             break;
 
+        // 进度
         remuxer->pos = (float)pkt->pts * av_q2d(ifmt_ctx->streams[pkt->stream_index]->time_base);
         if (remuxer->progressCB)
         {
-            remuxer->progressCB("remuxProgress", remuxer->in_file,  remuxer->duration, remuxer->pos);
+            remuxer->progressCB("remuxProgress", remuxer->in_file, remuxer->duration, remuxer->pos);
         }
 
         in_stream = ifmt_ctx->streams[pkt->stream_index];
-        if (pkt->stream_index >= stream_mapping_size ||
-            stream_mapping[pkt->stream_index] < 0)
+        if (pkt->stream_index >= stream_mapping_size || stream_mapping[pkt->stream_index] < 0)
         {
             av_packet_unref(pkt);
             continue;
@@ -222,16 +306,26 @@ int remux(Remuxer *remuxer)
         out_stream = ofmt_ctx->streams[pkt->stream_index];
         // log_packet(ifmt_ctx, pkt, "in");
 
-        /* copy packet */
-        av_packet_rescale_ts(pkt, in_stream->time_base, out_stream->time_base);
-        pkt->pos = -1;
-        // log_packet(ofmt_ctx, pkt, "out");
-
         time_t t4 = time(NULL);
-        printf("t4 = %ld\n", t4 - t1);
+         // 转换PTS/DTS
+        pkt->pts = av_rescale_q_rnd(pkt->pts, in_stream->time_base, out_stream->time_base, (enum AVRounding) (AV_ROUND_NEAR_INF | AV_ROUND_PASS_MINMAX));
+        pkt->dts = av_rescale_q_rnd(pkt->dts, in_stream->time_base, out_stream->time_base, (enum AVRounding) (AV_ROUND_NEAR_INF | AV_ROUND_PASS_MINMAX));
+        pkt->duration = av_rescale_q(pkt->duration, in_stream->time_base, out_stream->time_base);
 
+        if (video_stream_index == pkt->stream_index && is_annexb)
+        {
+            ret = filter_stream(bsf_ctx, ofmt_ctx, in_stream, out_stream, pkt);
+        }
+        else
+        {
+            // /* copy packet */
+            // av_packet_rescale_ts(pkt, in_stream->time_base, out_stream->time_base);
+            // pkt->pos = -1;
+            // log_packet(ofmt_ctx, pkt, "out");
+            ret = av_interleaved_write_frame(ofmt_ctx, pkt);
+        }
 
-        ret = av_interleaved_write_frame(ofmt_ctx, pkt);
+        // ret = av_interleaved_write_frame(ofmt_ctx, pkt);
         /* pkt is now blank (av_interleaved_write_frame() takes ownership of
          * its contents and resets pkt), so that no unreferencing is necessary.
          * This would be different if one used av_write_frame(). */
@@ -259,7 +353,7 @@ end:
     if (ret < 0 && ret != AVERROR_EOF)
     {
         fprintf(stderr, "Error occurred: %s\n", av_err2str(ret));
-        return 1;
+        return -1;
     }
 
     return 0;

@@ -6,6 +6,7 @@ import (
 )
 
 type AVKit struct {
+	Remuxing bool
 }
 
 func NewAVKit() *AVKit {
@@ -20,6 +21,6 @@ func (p *AVKit) Remux(in, out string, progressCB proto.GoRemuxProgressCB) error 
 	return ffmpeg.Remux(in, out, progressCB)
 }
 
-func (p *AVKit) Transcode(fn string) error {
-	return ffmpeg.Transcode(fn)
+func (p *AVKit) Transcode(in, out string) error {
+	return ffmpeg.Transcode(in, out)
 }

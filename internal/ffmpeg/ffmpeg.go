@@ -2,9 +2,6 @@ package ffmpeg
 
 import "C"
 import (
-	"fmt"
-	"strings"
-
 	"github.com/liuhengloveyou/avkit-go/proto"
 )
 
@@ -32,12 +29,6 @@ func Remux(in, out string, progressCB proto.GoRemuxProgressCB) error {
 	return cgo_remux(remuxer)
 }
 
-func Transcode(fn string) error {
-	idx := strings.LastIndex(fn, ".")
-	if idx < 0 {
-		return fmt.Errorf("找不到文件扩展名")
-	}
-
-	bfn := fn[:idx] + "-1" + fn[idx:]
-	return cgo_transcode(fn, bfn)
+func Transcode(in, out string) error {
+	return cgo_transcode(in, out)
 }

@@ -8,6 +8,7 @@ typedef struct Remuxer
     char in_file[1024];
     char out_file[1024];
 
+    int isStop;
     double duration;
     double pos;
 
